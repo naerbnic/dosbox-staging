@@ -391,105 +391,39 @@ public:
 	{
 		active = _active;
 	}
+
 	virtual bool IsPhysicalBreakpointAt(PhysPt adr) = 0;
 
 	virtual bool IsPhysicalBreakpointAtSegmentAndOffset(uint16_t seg, uint32_t off)
 	{
 		return false;
 	}
-	virtual bool CheckShouldBreak(Bitu seg, Bitu off)    = 0;
-	virtual bool CheckShouldBreakOnInt([[maybe_unused]] PhysPt adr,
-	                                   uint8_t intNr, uint16_t ahValue,
-	                                   uint16_t alValue) = 0;
-	virtual void Show(int nr)                            = 0;
+	
+	virtual bool CheckShouldBreak(Bitu seg, Bitu off) = 0;
+	virtual bool CheckShouldBreakOnInt(PhysPt adr, uint8_t intNr,
+	                                   uint16_t ahValue, uint16_t alValue) = 0;
+	virtual void Show(int nr) = 0;
 	virtual void NotifyMemoryRead(const PhysPt addr, std::size_t mem_size) = 0;
 
-protected:
-	void SetAddress(uint16_t seg, uint32_t off)
-	{
-		location = GetAddress(seg, off);
-		segment  = seg;
-		offset   = off;
-	}
-
-	void SetInt(uint8_t _intNr, uint16_t ah, uint16_t al)
-	{
-		intNr = _intNr, ahValue = ah;
-		alValue = al;
-	}
-	void SetValue(uint8_t value)
-	{
-		ahValue = value;
-	}
-
-	PhysPt GetLocation() const noexcept
-	{
-		return location;
-	}
-	uint16_t GetSegment() const noexcept
-	{
-		return segment;
-	}
-	uint32_t GetOffset() const noexcept
-	{
-		return offset;
-	}
-	uint8_t GetIntNr() const noexcept
-	{
-		return intNr;
-	}
-	uint16_t GetValue() const noexcept
-	{
-		return ahValue;
-	}
-	uint16_t GetOther() const noexcept
-	{
-		return alValue;
-	}
-
 private:
-	// Physical
-	PhysPt location  = 0;
-	uint8_t oldData  = 0;
-	uint16_t segment = 0;
-	uint32_t offset  = 0;
-	// Int
-	uint8_t intNr    = 0;
-	uint16_t ahValue = 0;
-	uint16_t alValue = 0;
 	// Shared
 	bool active = 0;
 	bool once   = 0;
-#if C_HEAVY_DEBUG
-	bool memory_was_read = false;
-
-	friend bool DEBUG_HeavyIsBreakpoint(void);
-#endif
 };
 
 CBreakpoint::CBreakpoint()
-        : 
-          location(0),
-          oldData(0xCC),
-          segment(0),
-          offset(0),
-          intNr(0),
-          ahValue(0),
-          alValue(0),
+        :
           active(false),
           once(false)
 {}
 
-// BKPNT_INTERRUPT, BKPNT_MEMORY, BKPNT_MEMORY_READ,
-// BKPNT_MEMORY_PROT,
-//        BKPNT_MEMORY_LINEAR
-
 class InstructionBreakpoint : public CBreakpoint {
 public:
 	InstructionBreakpoint(int16_t seg, int32_t off)
-	{
-		SetAddress(seg, off);
-	}
+	        : segment(seg),
+	          offset(off),
+	          location(GetAddress(seg, off))
+	{}
 
 	void Activate(bool _active) override
 	{
@@ -542,16 +476,16 @@ public:
 	}
 	bool IsPhysicalBreakpointAt(PhysPt adr) override
 	{
-		return GetLocation() == adr;
+		return location == adr;
 	}
 	bool IsPhysicalBreakpointAtSegmentAndOffset(uint16_t seg, uint32_t off) override
 	{
-		return GetSegment() == seg && GetOffset() == off;
+		return segment == seg && segment == off;
 	}
 
 	bool CheckShouldBreak(Bitu seg, Bitu off) override
 	{
-		return GetLocation() == GetAddress(seg, off);
+		return location == GetAddress(seg, off);
 	}
 
 	bool CheckShouldBreakOnInt([[maybe_unused]] PhysPt adr, uint8_t intNr,
@@ -562,19 +496,26 @@ public:
 
 	void Show(int nr) override
 	{
-		DEBUG_ShowMsg("%02X. BP %04X:%04X\n", nr, GetSegment(), GetOffset());
+		DEBUG_ShowMsg("%02X. BP %04X:%04X\n", nr, segment, location);
 	}
 
 	void NotifyMemoryRead(const PhysPt addr, std::size_t mem_size) override
 	{}
+
+private:
+	uint16_t segment;
+	uint32_t offset;
+	uint32_t location;
 };
 
 class InterruptBreakpoint : public CBreakpoint {
 public:
 	InterruptBreakpoint(uint8_t intNum, uint16_t ah, uint16_t al)
-	{
-		SetInt(intNum, ah, al);
-	}
+	        : intNr(intNum),
+	          ahValue(ah),
+	          alValue(al)
+	{}
+
 	bool IsPhysicalBreakpointAt(PhysPt adr) override
 	{
 		return false;
@@ -588,41 +529,41 @@ public:
 	bool CheckShouldBreakOnInt([[maybe_unused]] PhysPt adr, uint8_t intNr,
 	                           uint16_t ahValue, uint16_t alValue) override
 	{
-		if (GetIntNr() == intNr) {
-			return (((GetValue() == BPINT_ALL) || (GetValue() == ahValue)) &&
-			        ((GetOther() == BPINT_ALL) ||
-			         (GetOther() == alValue)));
+		if (this->intNr == intNr) {
+			return (((this->ahValue == BPINT_ALL) ||
+			         (this->ahValue == ahValue)) &&
+			        ((this->alValue == BPINT_ALL) ||
+			         (this->alValue == alValue)));
 		}
 		return false;
 	}
 
 	void Show(int nr) override
 	{
-		if (GetValue() == BPINT_ALL) {
-			DEBUG_ShowMsg("%02X. BPINT %02X\n", nr, GetIntNr());
-		} else if (GetOther() == BPINT_ALL) {
-			DEBUG_ShowMsg("%02X. BPINT %02X AH=%02X\n",
-			              nr,
-			              GetIntNr(),
-			              GetValue());
+		if (ahValue == BPINT_ALL) {
+			DEBUG_ShowMsg("%02X. BPINT %02X\n", nr, intNr);
+		} else if (alValue == BPINT_ALL) {
+			DEBUG_ShowMsg("%02X. BPINT %02X AH=%02X\n", nr, intNr, ahValue);
 		} else {
 			DEBUG_ShowMsg("%02X. BPINT %02X AH=%02X AL=%02X\n",
 			              nr,
-			              GetIntNr(),
-			              GetValue(),
-			              GetOther());
+			              intNr,
+			              ahValue,
+			              alValue);
 		}
 	}
 	void NotifyMemoryRead(const PhysPt addr, std::size_t mem_size) override
 	{}
+
+private:
+	uint8_t intNr;
+	uint16_t ahValue;
+	uint16_t alValue;
 };
 
 class MemoryBreakpoint : public CBreakpoint {
 public:
-	MemoryBreakpoint(int16_t seg, int32_t off)
-	{
-		SetAddress(seg, off);
-	}
+	MemoryBreakpoint() : prevValue(0) {}
 	bool IsPhysicalBreakpointAt(PhysPt adr) override
 	{
 		return false;
@@ -636,15 +577,14 @@ public:
 		if (mem_readb_checked(address, &value)) {
 			return false;
 		}
-		if (GetValue() != value) {
+		if (prevValue != value) {
 			// Yup, memory value changed
-			DEBUG_ShowMsg("DEBUG: Memory breakpoint %s: %04X:%04X - %02X -> %02X\n",
+			DEBUG_ShowMsg("DEBUG: Memory breakpoint %s: %s - %02X -> %02X\n",
 			              GetAddressTypeForDebug(),
-			              GetSegment(),
-			              GetOffset(),
-			              GetValue(),
+			              GetTextAddress().c_str(),
+			              prevValue,
 			              value);
-			SetValue(value);
+			prevValue = value;
 			return true;
 		}
 #endif
@@ -659,53 +599,82 @@ public:
 	void NotifyMemoryRead(const PhysPt addr, std::size_t mem_size) override
 	{}
 
+protected:
+	uint8_t GetPrevValue() const
+	{
+		return prevValue;
+	}
+
 	virtual PhysPt GetBreakAddress() const = 0;
 	virtual std::string_view GetAddressTypeForDebug() const
 	{
 		return "";
 	}
+	virtual std::string GetTextAddress() const = 0;
+
+private:
+	uint8_t prevValue;
 };
 
 class RealAddressMemoryBreakpoint : public MemoryBreakpoint {
 public:
 	RealAddressMemoryBreakpoint(int16_t seg, int32_t off)
-	        : MemoryBreakpoint(seg, off)
+	        : segment(seg),
+	          offset(off)
 	{}
-	PhysPt GetBreakAddress() const override
-	{
-		return GetAddress(GetSegment(), GetOffset());
-	}
 
 	void Show(int nr) override
 	{
 		DEBUG_ShowMsg("%02X. BPMEM %04X:%04X (%02X)\n",
 		              nr,
-		              GetSegment(),
-		              GetOffset(),
-		              GetValue());
+		              segment,
+		              offset,
+		              GetPrevValue());
 	}
+
+protected:
+	PhysPt GetBreakAddress() const override
+	{
+		return GetAddress(segment, offset);
+	}
+
+	std::string GetTextAddress() const override {
+		return format_string("%04X:%04X", segment, offset);
+	}
+
+private:
+	uint16_t segment;
+	uint32_t offset;
 };
 
 class LinearAddressMemoryBreakpoint : public MemoryBreakpoint {
 public:
 	LinearAddressMemoryBreakpoint(int16_t seg, int32_t off)
-	        : MemoryBreakpoint(seg, off)
+			: location(GetAddress(seg, off))
 	{}
-	PhysPt GetBreakAddress() const override
-	{
-		return GetOffset();
-	}
 
 	void Show(int nr) override
 	{
-		DEBUG_ShowMsg("%02X. BPLM %08X (%02X)\n", nr, GetOffset(), GetValue());
+		DEBUG_ShowMsg("%02X. BPLM %08X (%02X)\n", nr, location, GetPrevValue());
 	}
+
+protected:
+	PhysPt GetBreakAddress() const override
+	{
+		return location;
+	}
+
+	std::string GetTextAddress() const override {
+		return format_string("%08X", location);
+	}
+
+private:
+	PhysPt location;
 };
 
 class ProtectedAddressMemoryBreakpoint : public MemoryBreakpoint {
 public:
 	ProtectedAddressMemoryBreakpoint(int16_t seg, int32_t off)
-	        : MemoryBreakpoint(seg, off)
 	{}
 	bool CheckShouldBreak(Bitu seg, Bitu off) override
 	{
@@ -715,7 +684,7 @@ public:
 		}
 		// Check if descriptor is valid
 		Descriptor desc;
-		if (!cpu.gdt.GetDescriptor(GetSegment(), desc)) {
+		if (!cpu.gdt.GetDescriptor(segment, desc)) {
 			return false;
 		}
 		if (desc.GetLimit() == 0) {
@@ -725,32 +694,43 @@ public:
 		return MemoryBreakpoint::CheckShouldBreak(seg, off);
 	}
 
-	PhysPt GetBreakAddress() const override
-	{
-		return GetOffset();
-	}
-
 	void Show(int nr) override
 	{
 		DEBUG_ShowMsg("%02X. BPPM %04X:%08X (%02X)\n",
 		              nr,
-		              GetSegment(),
-		              GetOffset(),
-		              GetValue());
+		              segment,
+		              offset,
+		              GetPrevValue());
+	}
+
+protected:
+	PhysPt GetBreakAddress() const override
+	{
+		return GetAddress(segment, offset);
 	}
 
 	virtual std::string_view GetAddressTypeForDebug() const
 	{
 		return "(Prot)";
 	}
+
+	std::string GetTextAddress() const override {
+		return format_string("%04X:%08X", segment, offset);
+	}
+
+private:
+	uint16_t segment;
+	uint32_t offset;
 };
 
 class MemoryReadBreakpoint : public CBreakpoint {
 public:
 	MemoryReadBreakpoint(int16_t seg, int32_t off)
-	        : memory_read_(false)
+	        : segment(seg),
+	          offset(off),
+	          location(GetAddress(seg, off)),
+	          memory_read(false)
 	{
-		SetAddress(seg, off);
 	}
 
 	bool IsPhysicalBreakpointAt(PhysPt adr) override
@@ -761,12 +741,12 @@ public:
 	bool CheckShouldBreak(Bitu seg, Bitu off) override
 	{
 #if C_HEAVY_DEBUG
-		if (memory_read_) {
+		if (memory_read) {
 			// Yup, memory value was read
 			DEBUG_ShowMsg("DEBUG: Memory read breakpoint: %04X:%04X\n",
-			              GetSegment(),
-			              GetOffset());
-			memory_read_ = false;
+			              segment,
+			              offset);
+			memory_read = false;
 			return true;
 		}
 #endif
@@ -786,20 +766,23 @@ public:
 
 	void NotifyMemoryRead(const PhysPt addr, std::size_t mem_size) override
 	{
-		const PhysPt location_begin = GetLocation();
+		const PhysPt location_begin = location;
 		const PhysPt location_end   = location_begin + mem_size;
 		if ((addr >= location_begin) && (addr < location_end)) {
 			DEBUG_ShowMsg("bpmr hit: %04X:%04X, cs:ip = %04X:%04X",
-			              GetSegment(),
-			              GetOffset(),
+			              segment,
+			              offset,
 			              SegValue(cs),
 			              reg_eip);
-			memory_read_ = true;
+			memory_read = true;
 		}
 	}
 
 private:
-	bool memory_read_;
+	uint16_t segment;
+	uint32_t offset;
+	uint32_t location;
+	bool memory_read;
 };
 
 class BreakpointSet {
@@ -1039,7 +1022,7 @@ private:
 			bool atLocation =
 			        bp->IsPhysicalBreakpointAtSegmentAndOffset(seg, off);
 #else
-						 // Normal debugging breakpoints are triggered at an address
+			// Normal debugging breakpoints are triggered at an address
 			bool atLocation = bp->IsPhysicalBreakpointAt(adr);
 #endif
 			if (atLocation && bp->GetOnce() == once) {
