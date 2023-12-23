@@ -626,9 +626,7 @@ public:
 	{
 		// activate all breakpoints, except those at adr
 		for (auto& bp : breakpoints_) {
-			// Do not activate breakpoints at adr
-			if (bp->GetType() == BKPNT_PHYSICAL &&
-			    bp->GetLocation() == adr) {
+			if (IsPhysicalBreakpointAt(bp.get(), adr)) {
 				continue;
 			}
 			bp->Activate(true);
@@ -670,8 +668,15 @@ public:
 	CBreakpoint* FindOtherActiveBreakpoint(PhysPt adr, CBreakpoint* skip)
 	{
 		for (auto& bp : breakpoints_) {
-			if (bp.get() != skip && bp->GetType() == BKPNT_PHYSICAL &&
-			    bp->GetLocation() == adr && bp->IsActive()) {
+			if (!bp->IsActive()) {
+				continue;
+			}
+
+			if (bp.get() == skip) {
+				continue;
+			}
+
+			if (IsPhysicalBreakpointAt(bp.get(), adr)) {
 				return bp.get();
 			}
 		}
@@ -686,6 +691,8 @@ public:
 			return false;
 		}
 
+		bool should_break = false;
+
 		// Search matching breakpoint
 		for (auto i = breakpoints_.begin(); i != breakpoints_.end(); ++i) {
 			auto& bp = *i;
@@ -694,85 +701,17 @@ public:
 				continue;
 			}
 
-			if ((bp->GetType() == BKPNT_PHYSICAL) &&
-			    (bp->GetLocation() == GetAddress(seg, off))) {
-				// Found
+			bool is_bp_breaking = CheckSingleBreakpoint(bp.get(), seg, off);
+			should_break = should_break || is_bp_breaking;
+
+			if (is_bp_breaking) {
 				if (bp->GetOnce()) {
-					// delete it, if it should only be used
-					// once
 					bp->Activate(false);
 					breakpoints_.erase(i);
-				} else {
-					// Also look for once-only breakpoints
-					// at this address
-					auto it = FindPhysBreakpoint(seg, off, true);
-					if (it != breakpoints_.end()) {
-						(*it)->Activate(false);
-						breakpoints_.erase(it);
-					}
-				}
-				return true;
-			}
-#if C_HEAVY_DEBUG
-			// Memory breakpoint support
-			else if ((bp->GetType() == BKPNT_MEMORY) ||
-			         (bp->GetType() == BKPNT_MEMORY_PROT) ||
-			         (bp->GetType() == BKPNT_MEMORY_LINEAR)) {
-				// Watch Protected Mode Memoryonly in pmode
-				if (bp->GetType() == BKPNT_MEMORY_PROT) {
-					// Check if pmode is active
-					if (!cpu.pmode) {
-						return false;
-					}
-					// Check if descriptor is valid
-					Descriptor desc;
-					if (!cpu.gdt.GetDescriptor(bp->GetSegment(),
-					                           desc)) {
-						return false;
-					}
-					if (desc.GetLimit() == 0) {
-						return false;
-					}
-				}
-
-				Bitu address;
-				if (bp->GetType() == BKPNT_MEMORY_LINEAR) {
-					address = bp->GetOffset();
-				} else {
-					address = GetAddress(bp->GetSegment(),
-					                     bp->GetOffset());
-				}
-				uint8_t value = 0;
-				if (mem_readb_checked(address, &value)) {
-					return false;
-				}
-				if (bp->GetValue() != value) {
-					// Yup, memory value changed
-					DEBUG_ShowMsg("DEBUG: Memory breakpoint %s: %04X:%04X - %02X -> %02X\n",
-					              (bp->GetType() == BKPNT_MEMORY_PROT)
-					                      ? "(Prot)"
-					                      : "",
-					              bp->GetSegment(),
-					              bp->GetOffset(),
-					              bp->GetValue(),
-					              value);
-					bp->SetValue(value);
-					return true;
-				}
-			} else if (bp->GetType() == BKPNT_MEMORY_READ) {
-				if (bp->WasMemoryRead()) {
-					// Yup, memory value was read
-					DEBUG_ShowMsg("DEBUG: Memory read breakpoint: %04X:%04X\n",
-					              bp->GetSegment(),
-					              bp->GetOffset());
-					bp->FlagMemoryAsUnread();
-					return true;
 				}
 			}
-
-#endif
 		}
-		return false;
+		return should_break;
 	}
 
 	bool CheckIntBreakpoint([[maybe_unused]] PhysPt adr, uint8_t intNr,
@@ -783,24 +722,23 @@ public:
 			return false;
 		}
 
+		bool should_break = false;
+
 		// Search matching breakpoint
 		for (auto i = breakpoints_.begin(); i != breakpoints_.end(); ++i) {
 			auto& bp = *i;
-			if ((bp->GetType() == BKPNT_INTERRUPT) &&
-			    bp->IsActive() && (bp->GetIntNr() == intNr)) {
-				if (((bp->GetValue() == BPINT_ALL) ||
-				     (bp->GetValue() == ahValue)) &&
-				    ((bp->GetOther() == BPINT_ALL) ||
-				     (bp->GetOther() == alValue))) {
-					// Ignore it once ?
-					// Found
-					if (bp->GetOnce()) {
-						// delete it, if it should only
-						// be used once
-						bp->Activate(false);
-						breakpoints_.erase(i);
-					}
-					return true;
+			if (!bp->IsActive()) {
+				continue;
+			}
+
+			bool is_bp_breaking = CheckSingleIntBreakpoint(
+			        bp.get(), adr, intNr, ahValue, alValue);
+			should_break = should_break || is_bp_breaking;
+
+			if (is_bp_breaking) {
+				if (bp->GetOnce()) {
+					bp->Activate(false);
+					breakpoints_.erase(i);
 				}
 			}
 		}
@@ -834,46 +772,7 @@ public:
 		// iterate list
 		int nr = 0;
 		for (auto& bp : breakpoints_) {
-			if (bp->GetType() == BKPNT_PHYSICAL) {
-				DEBUG_ShowMsg("%02X. BP %04X:%04X\n",
-				              nr,
-				              bp->GetSegment(),
-				              bp->GetOffset());
-			} else if (bp->GetType() == BKPNT_INTERRUPT) {
-				if (bp->GetValue() == BPINT_ALL) {
-					DEBUG_ShowMsg("%02X. BPINT %02X\n",
-					              nr,
-					              bp->GetIntNr());
-				} else if (bp->GetOther() == BPINT_ALL) {
-					DEBUG_ShowMsg("%02X. BPINT %02X AH=%02X\n",
-					              nr,
-					              bp->GetIntNr(),
-					              bp->GetValue());
-				} else {
-					DEBUG_ShowMsg("%02X. BPINT %02X AH=%02X AL=%02X\n",
-					              nr,
-					              bp->GetIntNr(),
-					              bp->GetValue(),
-					              bp->GetOther());
-				}
-			} else if (bp->GetType() == BKPNT_MEMORY) {
-				DEBUG_ShowMsg("%02X. BPMEM %04X:%04X (%02X)\n",
-				              nr,
-				              bp->GetSegment(),
-				              bp->GetOffset(),
-				              bp->GetValue());
-			} else if (bp->GetType() == BKPNT_MEMORY_PROT) {
-				DEBUG_ShowMsg("%02X. BPPM %04X:%08X (%02X)\n",
-				              nr,
-				              bp->GetSegment(),
-				              bp->GetOffset(),
-				              bp->GetValue());
-			} else if (bp->GetType() == BKPNT_MEMORY_LINEAR) {
-				DEBUG_ShowMsg("%02X. BPLM %08X (%02X)\n",
-				              nr,
-				              bp->GetOffset(),
-				              bp->GetValue());
-			}
+			ShowBreakpoint(bp.get(), nr);
 			nr++;
 		}
 	}
@@ -881,19 +780,7 @@ public:
 	void UpdateMemoryReadBreakpoints(const PhysPt addr, std::size_t mem_size)
 	{
 		for (auto const& bp : breakpoints_) {
-			if (bp->GetType() == BKPNT_MEMORY_READ) {
-				const PhysPt location_begin = bp->GetLocation();
-				const PhysPt location_end   = location_begin + mem_size;
-				if ((addr >= location_begin) &&
-				    (addr < location_end)) {
-					DEBUG_ShowMsg("bpmr hit: %04X:%04X, cs:ip = %04X:%04X",
-					              bp->GetSegment(),
-					              bp->GetOffset(),
-					              SegValue(cs),
-					              reg_eip);
-					bp->FlagMemoryAsRead();
-				}
-			}
+			NotifyMemoryRead(bp.get(), addr, mem_size);
 		}
 	}
 
@@ -922,7 +809,147 @@ private:
 			            atLocation && bp->GetOnce() == once) {
 				        return true;
 			        }
+					return false;
 		        });
+	}
+
+	bool IsPhysicalBreakpointAt(CBreakpoint* bp, PhysPt adr) {
+		return bp->GetType() == BKPNT_PHYSICAL && bp->GetLocation() == adr;
+	}
+
+	bool CheckSingleBreakpoint(CBreakpoint* bp, Bitu seg, Bitu off)
+	{
+		if ((bp->GetType() == BKPNT_PHYSICAL) &&
+		    (bp->GetLocation() == GetAddress(seg, off))) {
+			return true;
+		}
+#if C_HEAVY_DEBUG
+		// Memory breakpoint support
+		else if ((bp->GetType() == BKPNT_MEMORY) ||
+		         (bp->GetType() == BKPNT_MEMORY_PROT) ||
+		         (bp->GetType() == BKPNT_MEMORY_LINEAR)) {
+			// Watch Protected Mode Memoryonly in pmode
+			if (bp->GetType() == BKPNT_MEMORY_PROT) {
+				// Check if pmode is active
+				if (!cpu.pmode) {
+					return false;
+				}
+				// Check if descriptor is valid
+				Descriptor desc;
+				if (!cpu.gdt.GetDescriptor(bp->GetSegment(), desc)) {
+					return false;
+				}
+				if (desc.GetLimit() == 0) {
+					return false;
+				}
+			}
+
+			Bitu address;
+			if (bp->GetType() == BKPNT_MEMORY_LINEAR) {
+				address = bp->GetOffset();
+			} else {
+				address = GetAddress(bp->GetSegment(),
+				                     bp->GetOffset());
+			}
+			uint8_t value = 0;
+			if (mem_readb_checked(address, &value)) {
+				return false;
+			}
+			if (bp->GetValue() != value) {
+				// Yup, memory value changed
+				DEBUG_ShowMsg("DEBUG: Memory breakpoint %s: %04X:%04X - %02X -> %02X\n",
+				              (bp->GetType() == BKPNT_MEMORY_PROT)
+				                      ? "(Prot)"
+				                      : "",
+				              bp->GetSegment(),
+				              bp->GetOffset(),
+				              bp->GetValue(),
+				              value);
+				bp->SetValue(value);
+				return true;
+			}
+		} else if (bp->GetType() == BKPNT_MEMORY_READ) {
+			if (bp->WasMemoryRead()) {
+				// Yup, memory value was read
+				DEBUG_ShowMsg("DEBUG: Memory read breakpoint: %04X:%04X\n",
+				              bp->GetSegment(),
+				              bp->GetOffset());
+				bp->FlagMemoryAsUnread();
+				return true;
+			}
+		}
+
+#endif
+		return false;
+	}
+
+	bool CheckSingleIntBreakpoint(CBreakpoint* bp,[[maybe_unused]] PhysPt adr, uint8_t intNr,
+	                              uint16_t ahValue, uint16_t alValue)
+	{
+		if ((bp->GetType() == BKPNT_INTERRUPT) &&
+		    (bp->GetIntNr() == intNr)) {
+			return (((bp->GetValue() == BPINT_ALL) ||
+			         (bp->GetValue() == ahValue)) &&
+			        ((bp->GetOther() == BPINT_ALL) ||
+			         (bp->GetOther() == alValue)));
+			
+		}
+		return false;
+	}
+
+	void ShowBreakpoint(CBreakpoint* bp, int nr) {
+		if (bp->GetType() == BKPNT_PHYSICAL) {
+			DEBUG_ShowMsg("%02X. BP %04X:%04X\n",
+			              nr,
+			              bp->GetSegment(),
+			              bp->GetOffset());
+		} else if (bp->GetType() == BKPNT_INTERRUPT) {
+			if (bp->GetValue() == BPINT_ALL) {
+				DEBUG_ShowMsg("%02X. BPINT %02X\n", nr, bp->GetIntNr());
+			} else if (bp->GetOther() == BPINT_ALL) {
+				DEBUG_ShowMsg("%02X. BPINT %02X AH=%02X\n",
+				              nr,
+				              bp->GetIntNr(),
+				              bp->GetValue());
+			} else {
+				DEBUG_ShowMsg("%02X. BPINT %02X AH=%02X AL=%02X\n",
+				              nr,
+				              bp->GetIntNr(),
+				              bp->GetValue(),
+				              bp->GetOther());
+			}
+		} else if (bp->GetType() == BKPNT_MEMORY) {
+			DEBUG_ShowMsg("%02X. BPMEM %04X:%04X (%02X)\n",
+			              nr,
+			              bp->GetSegment(),
+			              bp->GetOffset(),
+			              bp->GetValue());
+		} else if (bp->GetType() == BKPNT_MEMORY_PROT) {
+			DEBUG_ShowMsg("%02X. BPPM %04X:%08X (%02X)\n",
+			              nr,
+			              bp->GetSegment(),
+			              bp->GetOffset(),
+			              bp->GetValue());
+		} else if (bp->GetType() == BKPNT_MEMORY_LINEAR) {
+			DEBUG_ShowMsg("%02X. BPLM %08X (%02X)\n",
+			              nr,
+			              bp->GetOffset(),
+			              bp->GetValue());
+		}
+	}
+	void NotifyMemoryRead(CBreakpoint* bp, const PhysPt addr, std::size_t mem_size) {
+		if (bp->GetType() == BKPNT_MEMORY_READ) {
+			const PhysPt location_begin = bp->GetLocation();
+			const PhysPt location_end   = location_begin + mem_size;
+			if ((addr >= location_begin) && (addr < location_end)) {
+				DEBUG_ShowMsg("bpmr hit: %04X:%04X, cs:ip = %04X:%04X",
+				              bp->GetSegment(),
+				              bp->GetOffset(),
+				              SegValue(cs),
+				              reg_eip);
+				bp->FlagMemoryAsRead();
+			}
+		}
 	}
 
 	BreakpointList breakpoints_;
